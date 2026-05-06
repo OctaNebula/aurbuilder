@@ -13,4 +13,4 @@ bitwarden-bin
 blockbench
 bluetuith
 elecwhat-bin
-mattermost-desktop-git
+mattermost-desktop-bin
