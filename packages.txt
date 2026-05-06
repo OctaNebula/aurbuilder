@@ -8,3 +8,9 @@
 #   yay-bin
 #   visual-studio-code-bin
 #   spotify
+
+bitwarden-bin
+blockbench
+bluetuith
+elecwhat-bin
+mattermost-desktop-git
