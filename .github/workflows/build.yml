@@ -52,7 +52,8 @@ jobs:
           set -euo pipefail
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
-            git sudo gnupg pacman-contrib jq expac github-cli rsync openssh ca-certificates which
+            git sudo gnupg pacman-contrib jq expac github-cli rsync openssh ca-certificates which \
+            python nodejs npm
 
       - name: Create build user
         shell: bash
