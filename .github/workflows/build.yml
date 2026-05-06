@@ -255,19 +255,40 @@ jobs:
           # Always succeed — per-package failures are visible in the summary.
           exit 0
 
-      - name: Re-sign repo db
+      - name: Sign repo db and create client-facing symlinks
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
           cd /home/builder/repo
           pkgs=( *.pkg.tar.zst )
-          if [[ ${#pkgs[@]} -eq 0 ]]; then
-            echo "No packages built or downloaded; skipping repo-add."
-            exit 0
+
+          if (( ${#pkgs[@]} > 0 )); then
+            # repo-add -s signs the db as a side effect of (re)building it.
+            sudo -u builder -H \
+              repo-add -s -k "${GPGKEY}" "${REPO_NAME}.db.tar.gz" "${pkgs[@]}"
           fi
-          sudo -u builder -H \
-            repo-add -s -k "${GPGKEY}" "${REPO_NAME}.db.tar.gz" "${pkgs[@]}"
+
+          # Always (re)sign the db tarballs so even an empty initial repo
+          # serves a valid signature to clients running SigLevel=Required.
+          for tgz in "${REPO_NAME}.db.tar.gz" "${REPO_NAME}.files.tar.gz"; do
+            [[ -f "$tgz" ]] || continue
+            sudo -u builder -H gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" \
+              --local-user "$GPGKEY" \
+              --detach-sign --output "${tgz}.sig" "$tgz"
+          done
+
+          # Pacman fetches `<repo>.db.sig` matching the `<repo>.db` symlink,
+          # not `<repo>.db.tar.gz.sig`. Create the matching .sig symlinks.
+          sudo -u builder -H bash -c "
+            cd /home/builder/repo
+            [[ -f ${REPO_NAME}.db.tar.gz.sig ]] && ln -sf ${REPO_NAME}.db.tar.gz.sig ${REPO_NAME}.db.sig || true
+            [[ -f ${REPO_NAME}.files.tar.gz.sig ]] && ln -sf ${REPO_NAME}.files.tar.gz.sig ${REPO_NAME}.files.sig || true
+          "
+          ls -la
 
       - name: Export public key for clients
         shell: bash
@@ -289,10 +310,13 @@ jobs:
             *.pkg.tar.zst
             *.pkg.tar.zst.sig
             "${REPO_NAME}.db"
+            "${REPO_NAME}.db.sig"
             "${REPO_NAME}.db.tar.gz"
             "${REPO_NAME}.db.tar.gz.sig"
             "${REPO_NAME}.files"
+            "${REPO_NAME}.files.sig"
             "${REPO_NAME}.files.tar.gz"
+            "${REPO_NAME}.files.tar.gz.sig"
             "${REPO_NAME}.pub.gpg"
           )
           # Filter to existing files only (the glob may match nothing).
