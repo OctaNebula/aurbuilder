@@ -114,17 +114,20 @@ jobs:
           CONF
           chown -R builder:builder /home/builder/.gnupg
           printf '%s' "$GPG_PRIVATE_KEY" | sudo -u builder gpg --batch --pinentry-mode loopback --import
-          KEYID=$(sudo -u builder gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
-          if [[ -z "$KEYID" ]]; then
-            echo "::error::No secret key found after import."
+          # Pull the full 40-char fingerprint of the primary secret key.
+          # --import-ownertrust requires the fingerprint, not the short/long keyid.
+          FPR=$(sudo -u builder gpg --list-secret-keys --with-colons \
+                  | awk -F: '/^fpr/ {print $10; exit}')
+          if [[ -z "$FPR" ]]; then
+            echo "::error::No secret key fingerprint found after import."
             exit 1
           fi
-          echo "GPGKEY=$KEYID" >> "$GITHUB_ENV"
+          echo "GPGKEY=$FPR" >> "$GITHUB_ENV"
           # Trust ultimately so signing works without prompts.
-          echo "$KEYID:6:" | sudo -u builder gpg --import-ownertrust
+          echo "$FPR:6:" | sudo -u builder gpg --import-ownertrust
           # Warm the agent so subsequent signs don't prompt.
           echo "warmup" | sudo -u builder gpg --batch --pinentry-mode loopback \
-            --passphrase "$GPG_PASSPHRASE" --local-user "$KEYID" \
+            --passphrase "$GPG_PASSPHRASE" --local-user "$FPR" \
             --detach-sign --armor --output /tmp/.warmup.asc -
 
       - name: Configure makepkg
