@@ -160,10 +160,18 @@ jobs:
           else
             echo "No existing release; this is a fresh start."
           fi
-          # Make sure a db exists so aurutils has something to read.
+          # Make sure a db exists so aurutils/pacman have something to read.
           if [[ ! -f "/home/builder/repo/${REPO_NAME}.db.tar.gz" ]]; then
             sudo -u builder bash -c "cd /home/builder/repo && repo-add ${REPO_NAME}.db.tar.gz"
           fi
+          # repo-add doesn't always create the .db / .files symlinks on an
+          # empty initial db, but pacman -Sy looks for them by name. Ensure
+          # they exist (idempotent — `ln -sf` replaces existing symlinks).
+          sudo -u builder bash -c "
+            cd /home/builder/repo
+            ln -sf ${REPO_NAME}.db.tar.gz ${REPO_NAME}.db
+            [[ -f ${REPO_NAME}.files.tar.gz ]] && ln -sf ${REPO_NAME}.files.tar.gz ${REPO_NAME}.files || true
+          "
           ls -la /home/builder/repo
 
       - name: Register local repo with pacman
