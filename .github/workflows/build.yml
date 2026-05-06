@@ -150,6 +150,10 @@ jobs:
         run: |
           set -euo pipefail
           install -d -o builder -g builder /home/builder/repo
+          # Pacman 6.1+ does file:// downloads as the unprivileged `alpm` user.
+          # `useradd -m` makes /home/builder mode 700, which blocks alpm from
+          # traversing into the repo. Open up just the path that matters.
+          chmod 755 /home/builder /home/builder/repo
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Existing release found, downloading assets..."
             gh release download "$RELEASE_TAG" \
