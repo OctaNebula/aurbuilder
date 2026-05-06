@@ -1,0 +1,10 @@
+# One AUR package name per line. Comments (#) and blank lines are ignored.
+# VCS packages (anything ending -git, -svn, -hg, -bzr) are only rebuilt on the
+# weekly cron (Sun 04:00 UTC) or when build.yml is dispatched with
+# rebuild_vcs=true. All others build only when the AUR version is newer than
+# what is already in the published repo db.
+#
+# Example:
+#   yay-bin
+#   visual-studio-code-bin
+#   spotify

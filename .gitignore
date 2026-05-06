@@ -1,0 +1,13 @@
+# Build artifacts you'd see if you ever cloned this and ran the workflow
+# logic locally.
+*.pkg.tar.*
+*.sig
+*.db
+*.db.tar.*
+*.files
+*.files.tar.*
+pkg/
+src/
+.cache/
+.gnupg/
+aurbuilder.pub.gpg

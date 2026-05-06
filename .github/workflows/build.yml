@@ -1,0 +1,306 @@
+name: Build AUR packages
+
+on:
+  schedule:
+    # Routine builds every 6 hours.
+    - cron: '0 */6 * * *'
+    # Weekly VCS rebuild — Sunday 04:00 UTC.
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      rebuild_vcs:
+        description: 'Force VCS package rebuild this run'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  REPO_NAME: aurbuilder
+  RELEASE_TAG: repo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --user root
+    steps:
+      - name: Determine run mode
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          rebuild_vcs=0
+          if [[ "${{ github.event.schedule }}" == '0 4 * * 0' ]]; then
+            rebuild_vcs=1
+          fi
+          if [[ "${{ inputs.rebuild_vcs }}" == 'true' ]]; then
+            rebuild_vcs=1
+          fi
+          echo "rebuild_vcs=$rebuild_vcs" >> "$GITHUB_OUTPUT"
+          echo "Rebuild VCS this run: $rebuild_vcs"
+
+      - name: Sync pacman and install runtime deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            git sudo gnupg pacman-contrib jq expac github-cli rsync openssh ca-certificates which
+
+      - name: Create build user
+        shell: bash
+        run: |
+          set -euo pipefail
+          useradd -m -G wheel builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache pacman package cache
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/pacman/pkg
+          key: pacman-pkg-${{ github.run_id }}
+          restore-keys: |
+            pacman-pkg-
+
+      - name: Bootstrap aurutils
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -o builder -g builder /tmp/build
+          sudo -u builder bash <<'EOS'
+          set -euo pipefail
+          cd /tmp/build
+          git clone --depth=1 https://aur.archlinux.org/aurutils.git
+          cd aurutils
+          # aurutils' PKGBUILD is signed by its maintainer; we don't have their
+          # key trusted in this fresh container, so skip the pgp check on the
+          # bootstrap. Real packages built later go through normal makepkg.
+          makepkg --noconfirm --skippgpcheck --syncdeps
+          EOS
+          pacman -U --noconfirm /tmp/build/aurutils/aurutils-*.pkg.tar.zst
+
+      - name: Import GPG signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GPG_PRIVATE_KEY:-}" ]]; then
+            echo "::error::GPG_PRIVATE_KEY secret is not set. Add it before running."
+            exit 1
+          fi
+          install -d -m 700 -o builder -g builder /home/builder/.gnupg
+          cat > /home/builder/.gnupg/gpg-agent.conf <<'CONF'
+          allow-loopback-pinentry
+          default-cache-ttl 86400
+          max-cache-ttl 86400
+          CONF
+          cat > /home/builder/.gnupg/gpg.conf <<'CONF'
+          use-agent
+          pinentry-mode loopback
+          batch
+          CONF
+          chown -R builder:builder /home/builder/.gnupg
+          printf '%s' "$GPG_PRIVATE_KEY" | sudo -u builder gpg --batch --pinentry-mode loopback --import
+          KEYID=$(sudo -u builder gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+          if [[ -z "$KEYID" ]]; then
+            echo "::error::No secret key found after import."
+            exit 1
+          fi
+          echo "GPGKEY=$KEYID" >> "$GITHUB_ENV"
+          # Trust ultimately so signing works without prompts.
+          echo "$KEYID:6:" | sudo -u builder gpg --import-ownertrust
+          # Warm the agent so subsequent signs don't prompt.
+          echo "warmup" | sudo -u builder gpg --batch --pinentry-mode loopback \
+            --passphrase "$GPG_PASSPHRASE" --local-user "$KEYID" \
+            --detach-sign --armor --output /tmp/.warmup.asc -
+
+      - name: Configure makepkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /home/builder/.makepkg.conf <<CONF
+          PACKAGER="OctaNebula <kikvintar@gmail.com>"
+          GPGKEY="${GPGKEY}"
+          BUILDENV=(!distcc color !ccache check sign)
+          PKGEXT='.pkg.tar.zst'
+          MAKEFLAGS="-j$(nproc)"
+          CONF
+          chown builder:builder /home/builder/.makepkg.conf
+
+      - name: Pull existing release state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -o builder -g builder /home/builder/repo
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Existing release found, downloading assets..."
+            gh release download "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir /home/builder/repo \
+              --clobber || true
+            chown -R builder:builder /home/builder/repo
+          else
+            echo "No existing release; this is a fresh start."
+          fi
+          # Make sure a db exists so aurutils has something to read.
+          if [[ ! -f "/home/builder/repo/${REPO_NAME}.db.tar.gz" ]]; then
+            sudo -u builder bash -c "cd /home/builder/repo && repo-add ${REPO_NAME}.db.tar.gz"
+          fi
+          ls -la /home/builder/repo
+
+      - name: Register local repo with pacman
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >> /etc/pacman.conf <<CONF
+
+          [${REPO_NAME}]
+          SigLevel = Optional TrustAll
+          Server = file:///home/builder/repo
+          CONF
+          pacman -Syy
+
+      - name: Build packages
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          REBUILD_VCS: ${{ steps.mode.outputs.rebuild_vcs }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mapfile -t packages < <(grep -vE '^[[:space:]]*(#|$)' packages.txt || true)
+          if [[ ${#packages[@]} -eq 0 ]]; then
+            echo "packages.txt is empty — nothing to build."
+            {
+              echo "## Build summary"
+              echo
+              echo "_packages.txt is empty — nothing built._"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          declare -A results
+          for pkg in "${packages[@]}"; do
+            pkg="${pkg//[[:space:]]/}"
+            [[ -z "$pkg" ]] && continue
+            echo "::group::$pkg"
+            is_vcs=0
+            if [[ "$pkg" =~ -(git|svn|hg|bzr)$ ]]; then
+              is_vcs=1
+            fi
+            if [[ "$is_vcs" == "1" && "$REBUILD_VCS" != "1" ]]; then
+              echo "Skipping VCS package on non-weekly run"
+              results[$pkg]="skipped"
+              echo "::endgroup::"
+              continue
+            fi
+            extra=()
+            if [[ "$is_vcs" == "1" ]]; then
+              extra+=(--rebuild)
+            fi
+            # aur sync resolves AUR-to-AUR deps, only builds if newer (unless
+            # --rebuild forces it), signs because BUILDENV has 'sign', and
+            # adds to the local repo db on success.
+            if sudo -u builder -H \
+                 aur sync --no-view --noconfirm --sign \
+                          --database "$REPO_NAME" \
+                          "${extra[@]}" "$pkg"; then
+              results[$pkg]="ok"
+            else
+              results[$pkg]="failed"
+              echo "::warning::$pkg failed to build"
+            fi
+            echo "::endgroup::"
+          done
+
+          {
+            echo "## Build summary"
+            echo
+            echo "| Package | Result |"
+            echo "| --- | --- |"
+            for k in "${!results[@]}"; do
+              echo "| \`$k\` | ${results[$k]} |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Always succeed — per-package failures are visible in the summary.
+          exit 0
+
+      - name: Re-sign repo db
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          cd /home/builder/repo
+          pkgs=( *.pkg.tar.zst )
+          if [[ ${#pkgs[@]} -eq 0 ]]; then
+            echo "No packages built or downloaded; skipping repo-add."
+            exit 0
+          fi
+          sudo -u builder -H \
+            repo-add -s -k "${GPGKEY}" "${REPO_NAME}.db.tar.gz" "${pkgs[@]}"
+
+      - name: Export public key for clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -u builder gpg --armor --export "${GPGKEY}" \
+            > "/home/builder/repo/${REPO_NAME}.pub.gpg"
+          chown builder:builder "/home/builder/repo/${REPO_NAME}.pub.gpg"
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /home/builder/repo
+          shopt -s nullglob
+          assets=(
+            *.pkg.tar.zst
+            *.pkg.tar.zst.sig
+            "${REPO_NAME}.db"
+            "${REPO_NAME}.db.tar.gz"
+            "${REPO_NAME}.db.tar.gz.sig"
+            "${REPO_NAME}.files"
+            "${REPO_NAME}.files.tar.gz"
+            "${REPO_NAME}.pub.gpg"
+          )
+          # Filter to existing files only (the glob may match nothing).
+          existing=()
+          for a in "${assets[@]}"; do
+            [[ -e "$a" ]] && existing+=("$a")
+          done
+          if [[ ${#existing[@]} -eq 0 ]]; then
+            echo "Nothing to upload."
+            exit 0
+          fi
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "rolling repo" \
+              --notes "Auto-managed by .github/workflows/build.yml. Do not edit manually." \
+              --latest=false
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            "${existing[@]}"
+
+          echo "Uploaded ${#existing[@]} assets."
