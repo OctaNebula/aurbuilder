@@ -182,10 +182,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # SigLevel=Never: this local file:// repo was just written by this
+          # job; no need to round-trip through the pacman keyring (which would
+          # require importing the GPG key — irrelevant for a build-time
+          # consumer). Clients fetching from GitHub Releases enforce sigs.
           cat >> /etc/pacman.conf <<CONF
 
           [${REPO_NAME}]
-          SigLevel = Optional TrustAll
+          SigLevel = Never
           Server = file:///home/builder/repo
           CONF
           pacman -Syy
