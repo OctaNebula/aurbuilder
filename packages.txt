@@ -14,3 +14,4 @@ blockbench
 bluetuith
 elecwhat-bin
 mattermost-desktop-bin
+code-transparent
