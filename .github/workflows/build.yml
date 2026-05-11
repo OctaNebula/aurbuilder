@@ -53,7 +53,7 @@ jobs:
           pacman -Syu --noconfirm
           pacman -S --noconfirm --needed \
             git sudo gnupg pacman-contrib jq expac github-cli rsync openssh ca-certificates which \
-            python nodejs npm
+            python
 
       - name: Create build user
         shell: bash
